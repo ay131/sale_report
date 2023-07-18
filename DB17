@@ -1,0 +1,354 @@
+import datetime
+import decimal
+import psycopg2
+import psycopg2.extras
+
+
+class DB:
+    """ class for working with the database """
+
+    def __init__(self, conn, model_name):
+        """ init method"""
+        self.conn = conn
+        self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        self.model_name = model_name
+        self.model_id = self.get_model_id()
+        self.data, self.ids = self.get_all_data()
+        self.fields = self.get_fields()
+        self.rel_model = self.get_rel_model()
+        self.required_fields = self.get_required_fields()
+        self.relation_fields = self.get_relation_fields()
+        self.computed_fields = self.get_computed_fields()
+        self.size = len(self.ids)
+
+    def get_relation_fields(self):
+        """ method for getting relation fields
+         :return: relation fields"""
+        self.cur.execute(
+            f"SELECT name FROM ir_model_fields WHERE model_id = {self.model_id['id']} AND ttype IN('many2many','many2one','one2many')")
+        return [row['name'] for row in self.cur.fetchall()]
+
+    def get_computed_fields(self):
+        """ method for getting computed fields
+         :return: computed fields"""
+        self.cur.execute(
+            f"SELECT name FROM ir_model_fields WHERE model_id = {self.model_id['id']} AND compute is not null")
+        return [row['name'] for row in self.cur.fetchall()]
+
+    def get_required_fields(self):
+        """ method for getting required fields
+         :return: required fields"""
+        self.cur.execute(
+            f"SELECT name FROM ir_model_fields WHERE model_id = {self.model_id['id']} AND required = 'True'")
+        return [row['name'] for row in self.cur.fetchall()]
+
+    def get_rel_model(self):
+        """ method for getting model id
+         :return: model id"""
+        self.cur.execute(f"SELECT name FROM ir_model_relation ")
+        return self.cur.fetchall()
+
+    def get_model_id(self):
+        """ method for getting model id
+         :return: model id"""
+        self.cur.execute(f"SELECT id FROM ir_model WHERE model = '{self.model_name}'")
+        return self.cur.fetchone()
+
+    # def get_fields(self):
+    #     """ method for getting fields
+    #      :return: fields"""
+    #     vals = self.data
+    #     col = []
+    #     if vals:
+    #         for row in vals:
+    #             for rec in row:
+    #                 col.append(rec)
+    #     return col
+    def get_fields(self):
+        """ method for getting fields
+         :return: fields"""
+        self.cur.execute(
+            f"SELECT name FROM ir_model_fields WHERE model_id = {self.model_id['id']}")
+        return [row['name'] for row in self.cur.fetchall()]
+
+    def get_rel_field(self):
+        li = []
+        self.cur.execute(
+            f"SELECT name FROM ir_model_fields"
+            f" WHERE model_id ={self.model_id['id']} "
+            f"  AND  ttype IN('many2many','many2one','one2many') ")
+        for rec in self.cur.fetchall():
+            li.append(rec['name'])
+        return li
+
+    def get_all_data(self):
+        """ method for getting all data
+         :return: all data"""
+        self.cur.execute(f"SELECT * FROM {self.model_name.replace('.', '_')}")
+        fetchall = self.cur.fetchall()
+        li = []
+        ids = []
+        for row in fetchall:
+            for key, value in row.items():
+                if isinstance(value, datetime.datetime):
+                    row[key] = str(value.strftime("%Y-%m-%d %H:%M:%S"))
+                elif isinstance(value, decimal.Decimal):
+                    row[key] = str(value)
+                elif row[key] is None:
+                    continue
+            ids.append(row['id'])
+            li.append(row)
+        return li, ids
+
+    def create(self, data):
+        """ method for creating data
+         :param vals: data
+         :return: created data"""
+        for vals in data:
+            try:
+                self.cur.execute(f"INSERT INTO {self.model_name.replace('.', '_')} ({','.join(vals.keys())}) "
+                                 f"VALUES ({','.join(['%s'] * len(vals))}) RETURNING id", list(vals.values()))
+                self.conn.commit()
+                print(f"Record {self.cur.fetchone()['id']} created")
+            except Exception as e:
+                print(e)
+                self.update(vals)
+                print(f"Record {vals['id']} not created")
+                continue
+        # return self.cur.fetchone()['id']
+
+    def update(self, vals):
+        """ method for updating data
+         :param vals: data
+         :return: updated data"""
+        try:
+            self.cur.execute(
+                f"UPDATE {self.model_name.replace('.', '_')} SET {','.join([f'{key}=%s' for key in vals.keys()])} WHERE id = {vals['id']}",
+                list(vals.values()))
+            self.conn.commit()
+            print(f"Record {vals['id']} updated")
+        except Exception as e:
+            print(e)
+            self.conn.rollback()
+            print(f"Record {vals['id']} not updated")
+            self.delete(vals)
+
+        # return self.cur.fetchone()['id']
+
+    def delete(self, vals):
+        """ method for deleting data
+         :param ids: data
+         :return: deleted data"""
+        try:
+            self.cur.execute(f"DELETE FROM {self.model_name.replace('.', '_')} WHERE id = {vals['id']}")
+            self.conn.commit()
+            print(f"Record {vals['id']} deleted")
+            self.create([vals])
+        except Exception as e:
+            print(e)
+            self.conn.rollback()
+            print(f"Record {vals['id']} not deleted")
+
+
+def skip_not_exist_fields(old_fields, new_fields):
+    """ method for skip not exist fields
+     :return: skip not exist fields"""
+    print(old_fields)
+    return list(set(old_fields) - set(new_fields))
+
+
+def extract_db(db, model):
+    """ method for extracting db
+     :return: extracted db
+     """
+    db = DB(db, model)
+    return {
+        'model_name': db.model_name,
+        'model_id': db.model_id,
+        'fields': db.fields,
+        'relation_fields': db.relation_fields,
+        'data': db.data,
+        'required_fields': db.required_fields,
+        'rel_model': db.get_rel_model(),
+        'computed_fields': db.computed_fields,
+        'ids': db.ids,
+        'size': db.size
+    }
+
+
+odoo16 = psycopg2.connect(dbname="odoo160_new2", user="odoo15", password="odoo15", host="localhost", port="5432")
+odoo15 = psycopg2.connect(dbname="odoo160", user="odoo15", password="odoo15", host="localhost", port="5432")
+
+models = ['ir.attachment', 'plusone.case', 'mail.message']
+
+old = []
+new = []
+for model in models:
+    new.append(extract_db(odoo16, model))
+    old.append(extract_db(odoo15, model))
+    print('-------------------')
+print(old)
+print(new)
+
+
+def set_max_val(tables, db):
+    """ method for setting max val"""
+    for table in tables:
+        db.cur.execute(f"SELECT setval(%s,%s)",
+                       (f"{table.get('model_name').replace('.', '_')}_id_seq", max(table.get('ids'))))
+        db.conn.commit()
+
+
+def transform_data(old, new):
+    """ method for transforming data
+     :return: transformed data"""
+    OLD = []
+    for old_table, new_table in zip(old, new):
+        data = []
+        old_fields = old_table.get('fields')
+        new_fields = new_table.get('fields') + old_table.get('computed_fields')
+        print('old fields', old_fields)
+        print('new fields', new_fields)
+        skip_fields = skip_not_exist_fields(old_fields, new_fields)
+        print('****************************', skip_fields)
+        skip_fields2 = skip_not_exist_fields(new_table.get('relation_fields'), skip_fields)
+        skip_fields += skip_fields2
+        print(skip_fields)
+        if old_table.get('model_name') == 'res.company':
+            skip_fields.append('company_registry')
+        elif old_table.get('model_name') == 'res.partner':
+            skip_fields.append('height_moved0')
+            skip_fields.append('consent_attachment')
+            skip_fields.append('attachment')
+            skip_fields.append('all_cases_count')
+        elif old_table.get('model_name') == 'plusone.case':
+            skip_fields.remove('patient_id')
+        for row in old_table.get('data'):
+            print('old row', row)
+            for key in skip_fields:
+                try:
+                    del row[key]
+                except:
+                    continue
+            print('new row', row)
+            data.append(row)
+        old_table['data'] = data
+        OLD.append(old_table)
+    return OLD
+
+
+# def load_attachment(old_db,new_db):
+#     """ method for loading attachment
+#      :return: loaded attachment"""
+#     old=old_db.cur.execute(f"SELECT * FROM ir_attachment WHERE res_model = 'res.partner' or res_model = 'plusone.case' ")
+#     old = old_db.cur.fetchall()
+#     new=new_db.cur.execute(f"SELECT * FROM ir_attachment WHERE res_model = 'res.partner' or res_model = 'plusone.case' ")
+#     new = new_db.cur.fetchall()
+#     daa=transform_data(old,new)
+#     make_create_query(daa, new_db)
+
+def load_attachment(old_conn, new_conn):
+    odoo15_db = DB(old_conn, 'ir.attachment')
+    odoo16_db = DB(new_conn, 'ir.attachment')
+    odoo15_db.cur.execute(f"SELECT id,res_id FROM ir_attachment WHERE res_model = 'plusone.case'")
+    old_data = odoo15_db.cur.fetchall()
+    for row in old_data:
+        q = "UPDATE ir_attachment SET case_patient_files_id = %s  WHERE id = %s" % (row['res_id'], row['id'])
+        try:
+            odoo16_db.cur.execute(q)
+            odoo16_db.conn.commit()
+            print(f"Record {row['id']} updated")
+        except Exception as e:
+            print(e)
+            odoo16_db.conn.rollback()
+            print(f"Record {row['id']} not updated")
+            continue
+
+
+def load_relation(old_conn, new_conn, models):
+    for model in models:
+        odoo15_db = DB(old_conn, model)
+        odoo16_db = DB(new_conn,model)
+        print('old', odoo15_db.relation_fields)
+        print('old', odoo16_db.relation_fields)
+
+    # odoo15_db.cur.execute(f"SELECT id,res_id FROM ir_attachment WHERE res_model = 'plusone.case'")
+    # old_data = odoo15_db.cur.fetchall()
+    # for row in old_data:
+    #     q = "UPDATE ir_attachment SET case_patient_files_id = %s  WHERE id = %s" % (row['res_id'], row['id'])
+    #     try:
+    #         odoo16_db.cur.execute(q)
+    #         odoo16_db.conn.commit()
+    #         print(f"Record {row['id']} updated")
+    #     except Exception as e:
+    #         print(e)
+    #         odoo16_db.conn.rollback()
+    #         print(f"Record {row['id']} not updated")
+    #         # continue
+
+
+def make_update_query(tables, db):
+    """ method for making update query
+     :return: update query"""
+    for table in tables:
+        for row in table.get('data'):
+            print(
+                f"UPDATE {table.get('model_name').replace('.', '_')} SET {','.join([f'{key}=%s' for key in row.keys()])} WHERE id = {row['id']}",
+                list(row.values()))
+            try:
+                db.cur.execute(
+                    f"UPDATE {table.get('model_name').replace('.', '_')} SET {','.join([f'{key}=%s' for key in row.keys()])} WHERE id = {row['id']}",
+                    list(row.values()))
+                db.conn.commit()
+                print(f"Record {row['id']} updated")
+            except Exception as e:
+                print(e)
+                db.conn.rollback()
+                print(f"Record {row['id']} not updated")
+                continue
+
+
+def make_create_query(tables, db):
+    """ method for making create query
+     :return: create query"""
+    for table in tables:
+        for row in table.get('data'):
+            print(f"INSERT INTO {table.get('model_name').replace('.', '_')} ({','.join(row.keys())}) "
+                  f"VALUES ({','.join(['%s'] * len(row))}) RETURNING id", list(row.values()))
+            try:
+                db.cur.execute(f"INSERT INTO {table.get('model_name').replace('.', '_')} ({','.join(row.keys())}) "
+                               f"VALUES ({','.join(['%s'] * len(row))}) RETURNING id", list(row.values()))
+                db.conn.commit()
+                print(f"Record {db.cur.fetchone()['id']} created")
+            except Exception as e:
+                print(e)
+                db.conn.rollback()
+                print(f"Record {row['id']} not ")
+                continue
+
+
+tables = transform_data(old, new)
+print(tables)
+dddddd = DB(odoo16, 'res.partner')
+
+print(dddddd.rel_model)
+# make_create_query(tables,dddddd)
+set_max_val(tables, dddddd)
+load_attachment(odoo15, odoo16)
+load_relation(odoo15, odoo16, models)
+
+# for model in models:
+#     odoo16_db = DB(odoo16, model)
+#     odoo15_db = DB(odoo15, model)
+#     print(odoo16_db.data)
+#     print(odoo15_db.data)
+#     skip_fields = skip_not_exist_fields(old_db=odoo15_db, new_db=odoo16_db)
+#     print(skip_fields)
+
+# for row in odoo15_db.data:
+#     for key in skip_fields:
+#         del row[key]
+#         if key in odoo16_db.relation_fields:
+#             del row[key]
+#     print(odoo15_db.data)
+# odoo16_db.create(odoo15_db.data)
